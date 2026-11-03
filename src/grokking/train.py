@@ -37,13 +37,17 @@ def main():
     ap.add_argument("--log-every", type=int, default=100)
     ap.add_argument("--ckpt-every", type=int, default=1000)
     ap.add_argument("--run", default="main")
+    ap.add_argument("--init", choices=["paper", "pytorch"], default="paper")  # starting-weight scheme
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)                              # same starting weights every run
     dev = torch.device(args.device)
     train_x, train_y, test_x, test_y = (t.to(dev) for t in make_dataset(train_frac=args.train_frac, seed=args.seed))
 
-    model = Transformer().to(dev)
+    model = Transformer()
+    if args.init == "paper":
+        model.init_like_paper()
+    model = model.to(dev)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.wd, betas=(0.9, 0.98))
     # Warm up: ramp the learning rate from ~0 to lr over the first 10 steps, then hold it constant.
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda step: min((step + 1) / 10, 1.0))

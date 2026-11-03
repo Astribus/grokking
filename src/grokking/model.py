@@ -64,6 +64,23 @@ class Transformer(nn.Module):
         self.mlp = MLP(d_model, d_mlp)
         self.unembed = nn.Linear(d_model, vocab_out, bias=False)  # 128 numbers -> 113 answer scores
 
+    def init_like_paper(self):
+        """Match Nanda et al.'s starting weights: random normal, scaled by 1/sqrt(fan-in), zero biases.
+
+        PyTorch's defaults differ a lot: nn.Embedding starts at std 1.0 (~11x bigger than the paper's
+        1/sqrt(128) ~ 0.088), and nn.Linear uses a smaller uniform range.
+        """
+        d_model = self.embed.embedding_dim
+        with torch.no_grad():
+            for emb in (self.embed, self.pos_embed):
+                emb.weight.normal_(0, 1 / math.sqrt(d_model))
+            for lin in (self.attn.W_Q, self.attn.W_K, self.attn.W_V, self.attn.W_O, self.mlp.W_in, self.mlp.W_out):
+                lin.weight.normal_(0, 1 / math.sqrt(lin.in_features))
+                if lin.bias is not None:
+                    lin.bias.zero_()
+            self.unembed.weight.normal_(0, 1 / math.sqrt(self.unembed.out_features))  # paper: 1/sqrt(d_vocab)
+        return self
+
     def forward(self, tokens):                              # tokens: [batch, 3]
         positions = torch.arange(tokens.shape[1], device=tokens.device)
         resid = self.embed(tokens) + self.pos_embed(positions)  # the "residual stream": [batch, pos, d_model]
