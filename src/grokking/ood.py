@@ -142,7 +142,7 @@ def main():
     Path("runs/ood_summary.json").write_text(json.dumps(rows))
 
     # ---- Figure 1: in-distribution vs OOD accuracy per split (dots = seeds) ----
-    fig, ax = plt.subplots(figsize=(11, 4.8))
+    fig, ax = plt.subplots(figsize=(12, 5.4))
     for i, split in enumerate(SPLITS):
         rs = [r for r in rows if r["split"] == split]
         for j, (key_, col, lab) in enumerate([("test_id_acc", "tab:blue", "held-out pairs, same kind as training"),
@@ -156,15 +156,19 @@ def main():
             ax.text(xpos, sum(vals) / len(vals) + 0.03, f"{sum(vals) / len(vals):.0%}", ha="center", fontsize=8)
         if split == "holdout_answer" and rs:
             vals = [r["repair_ood_acc"] for r in rs]
-            ax.scatter([i + 0.18] * len(vals), vals, marker="*", s=120, color="gold", edgecolor="black",
-                       zorder=4, label="after rebuilding c₀'s readout row from the clock")
+            xpos = i + 0.5 * 0.36 + 0.36
+            ax.bar(xpos, sum(vals) / len(vals), 0.34, color="gold", edgecolor="black",
+                   label="never-seen answer, after rebuilding its readout row from the clock (no new data)")
+            ax.scatter([xpos] * len(vals), vals, color="black", s=12, zorder=3)
+            ax.text(xpos, sum(vals) / len(vals) + 0.03, f"{sum(vals) / len(vals):.0%}", ha="center", fontsize=8)
     ax.axhline(1 / P, color="gray", ls=":", lw=1)
     ax.set_xticks(range(len(SPLITS)), [NICE[s] for s in SPLITS], fontsize=9)
     ax.set(ylabel="accuracy (final, step 20k / 40k)", ylim=(0, 1.15),
            title="Does a grokked transformer learn the clock or the table? (3 seeds each)")
-    ax.legend(fontsize=8, loc="upper right")
+    ax.legend(fontsize=8, loc="upper center", bbox_to_anchor=(0.5, -0.16), ncol=1, frameon=False)
+    ax.set_xlim(-0.6, len(SPLITS) - 0.1)
     fig.tight_layout()
-    fig.savefig("figures/ood_summary.png", dpi=150)
+    fig.savefig("figures/ood_summary.png", dpi=150, bbox_inches="tight")
 
     # ---- Figure 2: OOD accuracy over training ----
     fig, axes = plt.subplots(1, 4, figsize=(17, 3.8), sharey=True)
@@ -177,6 +181,7 @@ def main():
             ln, = ax.plot(h["step"], h["test_acc"], lw=1.2, label=f"seed {seed}: same-kind test")
             ax.plot(h["step"], h["ood_acc"], lw=1.2, ls="--", color=ln.get_color(), label=f"seed {seed}: OOD")
         ax.set(title=NICE[split].replace("\n", " "), xlabel="step")
+        ax.set_xticks([0, 5000, 10000, 15000, 20000], ["0", "5k", "10k", "15k", "20k"])
         ax.grid(alpha=0.3)
     axes[0].set_ylabel("accuracy")
     axes[0].legend(fontsize=7)

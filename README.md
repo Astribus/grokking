@@ -13,7 +13,21 @@ Parts 1–2 reproduce Nanda et al. 2023 ([arXiv 2301.05217](https://arxiv.org/ab
 Part 3 is our own experiment: we searched for prior work on these structured holdouts and didn't find it
 (see *Prior work* at the end of Part 3).
 
-<!-- RESULTS-TLDR -->
+**Results in one table.** Each structured split trains on exactly 3,830 pairs (same as normal), 3 seeds each.
+
+| Trained without… | Same-kind test pairs | The never-seen kind | Verdict |
+|---|---|---|---|
+| (normal random 30%) | 100% (3/3 seeds) | n/a | groks at step 4.5k / 6.6k / 6.9k |
+| any number in the **first slot** (20 numbers) | 100% | **100%** (3/3) | clock: transfers across positions |
+| any **wraparound** (only a + b < 113) | 97% | **0%** (3/3) | **number line**: answers 112 for 89–100% of wraparound pairs |
+| any **a > b** (only a ≤ b) | 100% | **34%** (27–44%) | table: right only near the diagonal |
+| one **answer c₀** as a label | 100% | **0%** (3/3) | clock, but its readout row is deleted. **Rebuilding it from the other 112 rows → 100%** (3/3), with no new data |
+
+**Takeaway:** a grokked network learns the simplest rule *that its training data forces*, not "the" rule. When
+the data never shows a wraparound, ordinary addition is just as consistent and it learns that instead. When
+every answer is seen, it learns a real clock. That clock even computes answers it was never trained to output,
+but weight decay deletes the unused readout row, so the knowledge is invisible until you put the row back.
+
 
 ---
 
@@ -67,7 +81,61 @@ memorized table) gets erased by weight decay around steps 3k–4.5k, and that's 
 
 ![progress measures](figures/main_progress_measures.png)
 
-<!-- PART3 -->
+## Part 3 (new): Clock or table? Structured holdouts
+
+A random 30% split can't tell "learned the rule" apart from "learned a table that fills its own gaps",
+because the test pairs look just like the training pairs. So we removed whole *kinds* of pairs from training
+and tested on exactly those. Every split trains on the same 3,830 pairs as `main`, for 20k steps, with 3 seeds
+(the seed sets both the starting weights and which pairs are drawn).
+
+![summary](figures/ood_summary.png)
+
+![answer maps](figures/ood_answer_maps.png)
+
+**1. Number never in the first slot → 100%.** 20 numbers only ever appear as `b`. The model still gets every
+`a = held-out number` pair right, in all 3 seeds, within ~100 steps of grokking the normal pairs. The clock is a
+property of the token's embedding, and the attention layer reads it from either position.
+
+**2. No wraparound → it learns a number line, not a clock.** Trained only on a + b < 113, the data is equally
+consistent with ordinary addition, and that's what the network learns. Its embedding sits on the *lowest*
+frequencies (k = 1, 2: a smooth line, 68–78% of the embedding, in all 3 seeds) instead of a few mid/high
+clock frequencies. On wraparound pairs it gets 0% and outputs the biggest number it has, **112**, for 98%, 100%
+and 44% of them (≥ 100 for 89–100%). It is doing addition that saturates at the top instead of wrapping. It also
+never fully fits its own training set (99%) and its test accuracy keeps flickering. A number line is a worse fit
+for this vocabulary than a clock, but nothing in the data pushes it off the line.
+
+**3. Only a ≤ b → no commutativity.** Held-out a ≤ b pairs: 100%. Swapped pairs (a > b): 27–44%. The
+correct ones are close to the diagonal (mean a − b ≈ 18–30 vs ≈ 44 for the wrong ones). The wrong answers are
+not a − b, b − a, 2a or 2b. They cluster at a few fixed offsets. The architecture has separate position
+embeddings, so "a + b = b + a" isn't built in, and the model only extrapolates a little past the data.
+
+**4. One answer never a label → the circuit knows it, the readout doesn't.** Normal pairs: 100%. The 113 pairs
+that sum to c₀: 0%, in all 3 seeds. Weight decay shrinks c₀'s unembedding row to ~10⁻⁶ of a normal row, because
+nothing ever asks for it. But the clock predicts what that row should be: each column of W_U is a few cos/sin
+waves over the answers. We fit those waves on the other 112 rows (fit R² 0.98–0.99), write the value at c₀
+into the missing row, and re-score:
+
+| | Never-seen answer | Everything else |
+|---|---|---|
+| Trained model | 0% | 100% |
+| Row rebuilt from the clock fit | **100%** (3/3 seeds) | 100% (unchanged) |
+| Control: row = average of neighbours c₀ ± 1 | 0% (3/3) | 100% |
+
+So the input side and the MLP already compute the right angle for sums the model was never trained to output.
+Only the last lookup row was missing. The neighbour-average control fails because one step at frequency k turns the
+clock by k/113 of a circle. Above k ≈ 28 that's more than a quarter turn, so c₀ ± 1 point away from c₀ and their
+average has the wrong sign. Every run used such frequencies (43 and 55; 34 and 46; 48 and 53).
+
+![OOD curves](figures/ood_curves.png)
+
+**Control: weight decay 0.** Same as `main` with `--wd 0`: it memorizes, the weight norm grows to 70.9, and
+test accuracy stays at 8.5% through 20k steps. No grokking.
+
+**Prior work.** We searched for these structured holdouts on grokked modular addition and didn't find them.
+We also dropped two ideas because they were already published (what picks the frequencies,
+and grokking-time scaling laws). "Not found" is not "first ever". If you
+know of a paper that does this, please open an issue.
+
 
 ---
 
@@ -94,7 +162,8 @@ uv run python -m grokking.ood                              # analyse it
 
 ## Limitations
 
-- One architecture, one modulus (113), one training-set size (3,830 pairs). The structured-split results use 3 seeds each.
+- One architecture (1 layer, no LayerNorm), one modulus (113), one training-set size (3,830 pairs). Structured splits: 3 seeds each, 20k steps.
+- `nowrap`/`triangle` sample 3,830 of a 6,441-pair pool, so they are denser inside their pool than the random split.
 - The init-scale comparison in Part 1 is one seed per setting.
 - Neuron-team ablations zero neurons rather than mean-ablating them, so they can overstate each team's importance.
 
