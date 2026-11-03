@@ -67,18 +67,24 @@ def repair_answer_row(model, c0, key):
 
 
 def main():
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--ckpt", default="final.pt", help="e.g. ckpts/step004000.pt for a dry run")
+    args = ap.parse_args()
     Fb, _ = fourier_basis()
     rows = []
     for split in SPLITS:
         for seed in SEEDS:
             d = run_dir(split, seed)
-            if not (d / "final.pt").exists():
+            ck = d / ("final.pt" if d.name == "main" else args.ckpt)
+            if not ck.exists():
                 print("missing", d)
                 continue
-            h = json.loads((d / "metrics.json").read_text())
-            model = load(d / "final.pt")
+            mp = d / "metrics.json"
+            h = json.loads(mp.read_text()) if mp.exists() else {"step": [], "test_acc": [], "ood_acc": []}
+            model = load(ck)
             data = make_split(split, seed=seed)
-            r = {"split": split, "seed": seed, "run": d.name, "info": h.get("split_info", {}),
+            r = {"split": split, "seed": seed, "run": d.name, "info": data["info"] if "info" in data else {},
                  "train_acc": accuracy(model, *data["train"]),
                  "test_id_acc": accuracy(model, *data["test_id"]),
                  "ood_acc": accuracy(model, *data["ood"]),
@@ -89,7 +95,7 @@ def main():
             r["embed_energy"] = e.tolist()
 
             if split == "holdout_answer":
-                c0 = r["info"]["held_out_answer"]
+                c0 = data["info"]["held_out_answer"]
                 x, y = data["ood"]
                 with torch.no_grad():
                     lo = model(x)
@@ -100,11 +106,17 @@ def main():
                 r["c0_median_rank"] = rank.median().item()
                 norms = model.unembed.weight.norm(dim=1)
                 r["W_U_row_norm_c0_vs_mean"] = (norms[c0] / norms[torch.arange(P) != c0].mean()).item()
-                fixed, r2 = repair_answer_row(load(d / "final.pt"), c0, key)
+                fixed, r2 = repair_answer_row(load(ck), c0, key)
                 r["repair_fit_r2"] = r2
                 r["repair_ood_acc"] = accuracy(fixed, *data["ood"])
                 r["repair_test_id_acc"] = accuracy(fixed, *data["test_id"])
                 r["repair_train_acc"] = accuracy(fixed, *data["train"])
+                # Control: rebuild c0's row as the average of its two neighbours' rows (no clock knowledge).
+                nb = load(ck)
+                with torch.no_grad():
+                    nb.unembed.weight[c0] = (nb.unembed.weight[(c0 - 1) % P] + nb.unembed.weight[(c0 + 1) % P]) / 2
+                r["neighbor_ood_acc"] = accuracy(nb, *data["ood"])
+                r["neighbor_test_id_acc"] = accuracy(nb, *data["test_id"])
 
             if split == "triangle":
                 x, _ = data["ood"]
@@ -171,7 +183,40 @@ def main():
     fig.suptitle("Solid = held-out pairs of the same kind as training; dashed = the never-seen kind", y=1.0)
     fig.tight_layout()
     fig.savefig("figures/ood_curves.png", dpi=150)
-    print("saved figures/ood_summary.png, figures/ood_curves.png")
+    # ---- Figure 3: the model's answer for every (a, b): clock vs number line ----
+    from grokking.fourier import all_inputs
+    X = all_inputs()
+    truth = ((X[:, 0] + X[:, 1]) % P).reshape(P, P)
+    panels = [("truth: (a + b) mod 113", None, None)]
+    for split, title in [("random", "normal training (random 30%)"),
+                         ("nowrap", "trained only on a + b < 113"),
+                         ("triangle", "trained only on a ≤ b")]:
+        d = run_dir(split, 0)
+        ck = d / ("final.pt" if d.name == "main" else args.ckpt)
+        if ck.exists():
+            panels.append((title, load(ck), split))
+    fig, axes = plt.subplots(1, len(panels), figsize=(4.2 * len(panels), 4.3))
+    for ax, (title, m, split) in zip(axes, panels):
+        if m is None:
+            img = truth
+        else:
+            with torch.no_grad():
+                img = m(X).argmax(-1).reshape(P, P)
+        ax.imshow(img.numpy(), cmap="twilight", origin="lower", vmin=0, vmax=P - 1)   # cyclic colormap
+        if split == "nowrap":
+            ax.plot([0, P - 1], [P - 1, 0], color="white", lw=1, ls="--")
+        if split == "triangle":
+            ax.plot([0, P - 1], [0, P - 1], color="white", lw=1, ls="--")
+        if m is not None:
+            ok = (img == truth).double().mean().item()
+            title += f"\n{ok:.0%} correct over all pairs"
+        ax.set(title=title, xlabel="b", ylabel="a")
+        ax.title.set_fontsize(9)
+    fig.suptitle("The model's answer for every (a, b) (color = answer, cyclic). "
+                 "Dashed line = edge of what training covered.", y=1.0)
+    fig.tight_layout()
+    fig.savefig("figures/ood_answer_maps.png", dpi=150)
+    print("saved figures/ood_summary.png, figures/ood_curves.png, figures/ood_answer_maps.png")
 
 
 if __name__ == "__main__":
