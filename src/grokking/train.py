@@ -11,7 +11,7 @@ from pathlib import Path
 import torch
 import torch.nn.functional as F
 
-from grokking.data import make_dataset
+from grokking.data import SPLITS, make_split
 from grokking.model import Transformer
 
 
@@ -38,11 +38,21 @@ def main():
     ap.add_argument("--ckpt-every", type=int, default=1000)
     ap.add_argument("--run", default="main")
     ap.add_argument("--init", choices=["paper", "pytorch"], default="paper")  # starting-weight scheme
+    ap.add_argument("--split", choices=SPLITS, default="random")     # structured holdouts (README Part 3)
+    ap.add_argument("--data-seed", type=int, default=None)          # default: same as --seed
+    ap.add_argument("--threads", type=int, default=0)               # CPU threads (0 = PyTorch default)
     args = ap.parse_args()
+    if args.threads:
+        torch.set_num_threads(args.threads)
+    data_seed = args.seed if args.data_seed is None else args.data_seed
 
     torch.manual_seed(args.seed)                              # same starting weights every run
     dev = torch.device(args.device)
-    train_x, train_y, test_x, test_y = (t.to(dev) for t in make_dataset(train_frac=args.train_frac, seed=args.seed))
+    n_train = int(args.train_frac * 113 * 113)
+    split = make_split(args.split, n_train=n_train, seed=data_seed)
+    train_x, train_y = (t.to(dev) for t in split["train"])
+    test_x, test_y = (t.to(dev) for t in split["test_id"])      # in-distribution held-out pairs
+    ood_x, ood_y = (t.to(dev) for t in split["ood"])            # structured holdout (empty for random)
 
     model = Transformer()
     if args.init == "paper":
@@ -54,8 +64,8 @@ def main():
 
     out = Path("runs") / args.run
     (out / "ckpts").mkdir(parents=True, exist_ok=True)
-    history = {"args": vars(args), "step": [], "train_loss": [], "test_loss": [],
-               "train_acc": [], "test_acc": [], "weight_norm": []}
+    history = {"args": vars(args), "split_info": split["info"], "step": [], "train_loss": [], "test_loss": [],
+               "train_acc": [], "test_acc": [], "weight_norm": [], "ood_loss": [], "ood_acc": []}
 
     start = time.time()
     for step in range(args.steps + 1):
@@ -73,13 +83,18 @@ def main():
             with torch.no_grad():
                 test_loss, test_acc = loss_and_acc(model, test_x, test_y)
                 norm = torch.sqrt(sum((p ** 2).sum() for p in model.parameters()))
+                if len(ood_y):
+                    ood_loss, ood_acc = loss_and_acc(model, ood_x, ood_y)
+                    history["ood_loss"].append(ood_loss.item())
+                    history["ood_acc"].append(ood_acc.item())
             for key, val in [("step", step), ("train_loss", loss.item()), ("test_loss", test_loss.item()),
                              ("train_acc", acc.item()), ("test_acc", test_acc.item()), ("weight_norm", norm.item())]:
                 history[key].append(val)
             if step % (args.log_every * 10) == 0:
                 print(f"step {step:6d} | train loss {loss.item():.4f} acc {acc.item():.3f} | "
                       f"test loss {test_loss.item():.4f} acc {test_acc.item():.3f} | "
-                      f"|W| {norm.item():.1f} | {time.time() - start:.0f}s", flush=True)
+                      + (f"ood acc {ood_acc.item():.3f} | " if len(ood_y) else "")
+                      + f"|W| {norm.item():.1f} | {time.time() - start:.0f}s", flush=True)
 
         if step % args.ckpt_every == 0:
             torch.save(model.state_dict(), out / "ckpts" / f"step{step:06d}.pt")

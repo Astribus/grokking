@@ -49,6 +49,34 @@ def load(path):
     return model.eval()
 
 
+def all_inputs(p=P):
+    """Every (a, b) pair as model input [a, b, =]: shape [p*p, 3], row index = a*p + b."""
+    a = torch.arange(p).repeat_interleave(p)
+    b = torch.arange(p).repeat(p)
+    return torch.stack([a, b, torch.full_like(a, p)], dim=1)
+
+
+def neuron_frequencies(model, F):
+    """For each MLP neuron: its activation map over all (a, b), its best frequency, and how clean it is."""
+    with torch.no_grad():
+        model(all_inputs())
+    acts = model.mlp.last_hidden[:, -1, :]                           # [12769, 512] at the "=" position
+    # Project each neuron's (a, b) map onto 2-D waves and add up energy by frequency.
+    A = acts.double().reshape(P, P, -1)                              # [a, b, neuron]
+    C = torch.einsum("ia,jb,abn->ijn", F, F, A).pow(2)               # 2-D Fourier energy per neuron
+    C[0, 0] = 0                                                      # ignore the constant part
+    per_k = torch.zeros(57, C.shape[-1], dtype=torch.float64)
+    for i in range(P):
+        for j in range(P):
+            ki, kj = (i + 1) // 2, (j + 1) // 2                      # frequency of row i / column j
+            if ki == kj or ki == 0 or kj == 0:                       # terms that use one frequency
+                per_k[max(ki, kj)] += C[i, j]
+    best_k = per_k.argmax(dim=0)
+    best_frac = per_k.max(dim=0).values / C.sum(dim=(0, 1))
+    alive = acts.abs().sum(dim=0) > 0
+    return A, best_k, best_frac, alive
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--run", default="main")
@@ -126,25 +154,7 @@ def main():
     fig.savefig(f"figures/{args.run}_fourier_over_training.png", dpi=150)
 
     # ---- 3. MLP neurons: what does one neuron's activation look like over every (a, b)? ----
-    a = torch.arange(P).repeat_interleave(P)
-    b = torch.arange(P).repeat(P)
-    grid = torch.stack([a, b, torch.full_like(a, P)], dim=1)        # all 12,769 inputs
-    with torch.no_grad():
-        model(grid)
-    acts = model.mlp.last_hidden[:, -1, :]                           # [12769, 512] at the "=" position
-    # For each neuron, which single frequency best explains it? Project its (a, b) map onto 2-D waves.
-    A = acts.double().reshape(P, P, -1)                              # [a, b, neuron]
-    C = torch.einsum("ia,jb,abn->ijn", F, F, A).pow(2)               # 2-D Fourier energy per neuron
-    C[0, 0] = 0                                                      # ignore the constant part
-    per_k = torch.zeros(57, C.shape[-1], dtype=torch.float64)
-    for i in range(P):
-        for j in range(P):
-            ki, kj = (i + 1) // 2, (j + 1) // 2                      # frequency of row i / column j
-            if ki == kj or ki == 0 or kj == 0:                       # terms that use one frequency
-                per_k[max(ki, kj)] += C[i, j]
-    best_k = per_k.argmax(dim=0)
-    best_frac = per_k.max(dim=0).values / C.sum(dim=(0, 1))
-    alive = acts.abs().sum(dim=0) > 0
+    A, best_k, best_frac, alive = neuron_frequencies(model, F)
     counts = {int(k): int(((best_k == k) & alive).sum()) for k in key}
     clean = int(((best_frac > 0.5) & alive).sum())
     print(f"neurons alive: {int(alive.sum())}/512; mostly one frequency (>50% of energy): {clean}")
